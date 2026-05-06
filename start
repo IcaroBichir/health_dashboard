@@ -23,24 +23,35 @@ else
   fi
 fi
 
+MFP_OK=0
 if [ ! -f "$MFP_CACHE" ]; then
-  echo "  MFP     ✗  not authenticated — run: cd ../mcp_myfitnesspal && .venv/bin/mfp-mcp auth"
-  echo "             (nutrition sections will show 'No nutrition data')"
+  echo "  MFP     ✗  not authenticated"
+  echo "             run: cd ../mcp_myfitnesspal && .venv/bin/mfp-mcp auth"
   WARN=1
 else
   MTIME=$(python3 -c "import os; print(int(os.path.getmtime('$MFP_CACHE')))" 2>/dev/null || echo 0)
   AGE=$(( NOW - MTIME ))
   if [ "$AGE" -gt 43200 ]; then
-    echo "  MFP     ⚠  cookie cache stale ($(( AGE / 3600 ))h old) — run: cd ../mcp_myfitnesspal && .venv/bin/mfp-mcp auth"
+    echo "  MFP     ⚠  cookie cache stale ($(( AGE / 3600 ))h old)"
+    echo "             run: cd ../mcp_myfitnesspal && .venv/bin/mfp-mcp auth"
+    WARN=1
   else
     REMAINING=$(( (43200 - AGE) / 60 ))
     echo "  MFP     ✓  (cache expires in ${REMAINING}m)"
+    MFP_OK=1
   fi
 fi
 
 echo ""
-[ "$WARN" -eq 1 ] && echo "Dashboard starting (some data unavailable — see above)" || echo "Dashboard starting..."
+if [ "$WARN" -eq 1 ]; then
+  echo "Dashboard starting (some data unavailable — see above)"
+else
+  echo "Dashboard starting..."
+fi
 echo "  → http://localhost:8501"
 echo ""
 
+# Pass MFP_REQUIRED=1 when auth is confirmed fresh so mfp_data.py raises
+# visibly instead of silently swallowing errors mid-session.
+export MFP_REQUIRED=$MFP_OK
 exec .venv/bin/streamlit run app.py --server.headless false "$@"
