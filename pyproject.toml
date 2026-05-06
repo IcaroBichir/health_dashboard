@@ -1,0 +1,13 @@
+[project]
+name = "health-dashboard"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40.0",
+]
+
+# strava-mcp is installed from the local path to pick up the SQLite cache:
+#   pip install -e ../mcp_strava
+
+[tool.hatch.build.targets.wheel]
+packages = []
