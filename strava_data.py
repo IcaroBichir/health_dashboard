@@ -15,7 +15,19 @@ SPORT_EMOJI: dict[str, str] = {
 
 def get_activities_in_range(start: date, end: date) -> list[dict]:
     from strava_mcp.client import StravaClient
-    return StravaClient().list_activities_in_range(start, end)
+    client = StravaClient()
+    activities = client.list_activities_in_range(start, end)
+    # The /athlete/activities summary endpoint omits calories.
+    # Enrich from the detailed endpoint (cached 15 days) for each activity missing it.
+    for a in activities:
+        if not a.get("calories") and a.get("id"):
+            try:
+                detailed = client.get_activity(a["id"])
+                if detailed.get("calories"):
+                    a["calories"] = detailed["calories"]
+            except Exception:
+                pass
+    return activities
 
 
 def fmt_distance(meters) -> str:

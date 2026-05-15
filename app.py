@@ -104,18 +104,18 @@ def _delete_from_sqlite(db_path: Path, pattern: str, like: bool = False) -> None
         conn.execute(f"DELETE FROM cache WHERE key {op} ?", (pattern,))
 
 
-def force_api_refresh() -> None:
-    """Bypass local SQLite caches for today and yesterday, then clear Streamlit cache."""
+def force_api_refresh(start: date) -> None:
+    """Bypass local SQLite caches from start up to today."""
     strava_db = Path.home() / ".config" / "strava-mcp" / "cache.db"
     mfp_db    = Path.home() / ".config" / "mfp-mcp"    / "cache.db"
 
-    for d in (today, yesterday):
+    d = today
+    while d >= start:
         _delete_from_sqlite(strava_db, f"activities_day:{d.isoformat()}")
         _delete_from_sqlite(mfp_db,    f"diary:%:{d.isoformat()}", like=True)
+        d -= timedelta(days=1)
 
-    # Also evict the athlete stats cache so it re-fetches the latest weekly summary
     _delete_from_sqlite(strava_db, "athlete_stats:%", like=True)
-
     st.cache_data.clear()
 
 
@@ -201,13 +201,16 @@ def render_activity(a: dict) -> None:
     name = a.get("name", sport)
     time_str = a.get("start_date_local", "")[:16].replace("T", " ")
     stats = _activity_stats(a)
+    cals = int(a.get("calories") or 0)
 
     with st.container(border=True):
-        left, right = st.columns([2, 3])
+        left, mid, right = st.columns([2, 3, 1])
         left.markdown(f"**{emoji} {name}**")
         left.caption(time_str)
         if stats:
-            right.caption(stats)
+            mid.caption(stats)
+        if cals:
+            right.metric("Burned", f"{cals} kcal")
 
 
 def render_nutrition(data: dict) -> None:
@@ -237,6 +240,17 @@ def render_nutrition(data: dict) -> None:
         c4.metric("Fat", f"{fat:.0f} g")
 
 
+def render_calorie_balance(calories_consumed: int, calories_burned: int) -> None:
+    if not calories_consumed and not calories_burned:
+        return
+    net = calories_consumed - calories_burned
+    with st.container(border=True):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Consumed", f"{calories_consumed} kcal" if calories_consumed else "—")
+        c2.metric("Burned", f"{calories_burned} kcal" if calories_burned else "—")
+        c3.metric("Net", f"{net:+d} kcal")
+
+
 def _nutrition_avgs(days: list[dict]) -> dict | None:
     with_data = [d for d in days if d.get("daily_totals")]
     if not with_data:
@@ -249,6 +263,10 @@ def _nutrition_avgs(days: list[dict]) -> dict | None:
         "carbs":    sum(d["daily_totals"].get("carbohydrates", 0)  for d in with_data) / n,
         "fat":      sum(d["daily_totals"].get("fat", 0)            for d in with_data) / n,
     }
+
+
+def _total_burned(activities: list[dict]) -> int:
+    return round(sum(a.get("calories", 0) for a in activities))
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -265,19 +283,32 @@ if api_col.button("⬇ Pull API", use_container_width=True, help="Bypass local c
     st.session_state["confirm_api_pull"] = True
 
 if st.session_state.get("confirm_api_pull"):
+    _REFRESH_RANGES = {
+        "Today":        today,
+        "Yesterday":    yesterday,
+        "Last 7 Days":  week_start,
+        "Last 30 Days": month_start,
+    }
+    sel_col, yes_col, no_col, _ = st.columns([2, 1, 1, 4])
+    selected_range = sel_col.selectbox(
+        "Range",
+        list(_REFRESH_RANGES.keys()),
+        index=3,
+        label_visibility="collapsed",
+    )
+    start_of_range = _REFRESH_RANGES[selected_range]
     st.warning(
-        "This will make live API calls to **Strava** and **MyFitnessPal**, "
-        "bypassing today's and yesterday's local cache. "
+        f"This will make live API calls to **Strava** and **MyFitnessPal** "
+        f"for **{selected_range}**, bypassing the local cache. "
         "Both services rate-limit requests — use sparingly.",
         icon="⚠️",
     )
-    yes_col, no_col, _ = st.columns([1, 1, 5])
-    if yes_col.button("Confirm", type="primary"):
+    if yes_col.button("Confirm", type="primary", use_container_width=True):
         st.session_state.pop("confirm_api_pull", None)
-        with st.spinner("Clearing cache and fetching from API…"):
-            force_api_refresh()
+        with st.spinner(f"Clearing cache and fetching {selected_range} from API…"):
+            force_api_refresh(start_of_range)
         st.rerun()
-    if no_col.button("Cancel"):
+    if no_col.button("Cancel", use_container_width=True):
         st.session_state.pop("confirm_api_pull", None)
         st.rerun()
 
@@ -294,6 +325,19 @@ with st.spinner("Loading…"):
 today_acts     = [a for a in all_week if a.get("start_date_local", "")[:10] == str(today)]
 yesterday_acts = [a for a in all_week if a.get("start_date_local", "")[:10] == str(yesterday)]
 
+today_burned     = _total_burned(today_acts)
+yesterday_burned = _total_burned(yesterday_acts)
+week_burned      = _total_burned(all_week)
+month_burned     = _total_burned(all_month)
+
+def _consumed(data: dict) -> int:
+    return round(data.get("daily_totals", {}).get("calories", 0))
+
+today_consumed     = _consumed(nutrition_today)
+yesterday_consumed = _consumed(nutrition_yesterday)
+week_consumed      = round(sum(_consumed(d) for d in nutrition_week))
+month_consumed     = round(sum(_consumed(d) for d in nutrition_month))
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 tab1, tab2, tab3 = st.tabs(["Today & Yesterday", "Last 7 Days", "Last 30 Days"])
@@ -305,6 +349,7 @@ with tab1:
 
     with col_today:
         st.subheader(f"Today · {today.strftime('%b %d')}")
+        st.markdown("**Exercise**")
         if today_acts:
             for a in today_acts:
                 render_activity(a)
@@ -312,9 +357,12 @@ with tab1:
             st.caption("No activities yet")
         st.markdown("**Nutrition**")
         render_nutrition(nutrition_today)
+        st.markdown("**Calorie Balance**")
+        render_calorie_balance(today_consumed, today_burned)
 
     with col_yesterday:
         st.subheader(f"Yesterday · {yesterday.strftime('%b %d')}")
+        st.markdown("**Exercise**")
         if yesterday_acts:
             for a in yesterday_acts:
                 render_activity(a)
@@ -322,6 +370,8 @@ with tab1:
             st.caption("No activities")
         st.markdown("**Nutrition**")
         render_nutrition(nutrition_yesterday)
+        st.markdown("**Calorie Balance**")
+        render_calorie_balance(yesterday_consumed, yesterday_burned)
 
 # ── Tab 2: Last 7 Days ────────────────────────────────────────────────────────
 
@@ -329,21 +379,28 @@ with tab2:
     st.subheader(f"Last 7 Days · {week_start.strftime('%b %d')} – {today.strftime('%b %d')}")
 
     runs  = [a for a in all_week if a.get("sport_type") == "Run"]
+    avg_burned_week = round(week_burned / 7)
 
-    m1, m2, m3, m4 = st.columns(4)
+    st.markdown("**Exercise**")
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Activities", len(all_week))
     m2.metric("Runs", len(runs))
     m3.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs)))
     m4.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_week)))
+    m5.metric("Calories Burned", f"{week_burned} kcal")
 
     avgs = _nutrition_avgs(nutrition_week)
     if avgs:
+        st.markdown("**Nutrition**")
         n1, n2, n3, n4 = st.columns(4)
         n1.metric("Avg Calories", f"{avgs['calories']:.0f} kcal",
                   delta=f"{avgs['n']} days logged", delta_color="off")
         n2.metric("Avg Protein", f"{avgs['protein']:.0f} g")
         n3.metric("Avg Carbs",   f"{avgs['carbs']:.0f} g")
         n4.metric("Avg Fat",     f"{avgs['fat']:.0f} g")
+
+    st.markdown("**Calorie Balance (7-day total)**")
+    render_calorie_balance(week_consumed, week_burned)
 
     if all_week:
         st.divider()
@@ -360,21 +417,28 @@ with tab3:
     runs_m  = [a for a in all_month if a.get("sport_type") == "Run"]
     rides_m = [a for a in all_month if a.get("sport_type") in ("Ride", "VirtualRide")]
     lifts_m = [a for a in all_month if a.get("sport_type") == "WeightTraining"]
+    avg_burned_month = round(month_burned / 30)
 
-    m1, m2, m3, m4 = st.columns(4)
+    st.markdown("**Exercise**")
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total Activities", len(all_month))
-    m2.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs_m)))
-    m3.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_month)))
-    m4.metric("Runs / Rides / Lifts", f"{len(runs_m)} / {len(rides_m)} / {len(lifts_m)}")
+    m2.metric("Runs / Rides / Lifts", f"{len(runs_m)} / {len(rides_m)} / {len(lifts_m)}")
+    m3.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs_m)))
+    m4.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_month)))
+    m5.metric("Calories Burned", f"{month_burned} kcal")
 
     avgs_m = _nutrition_avgs(nutrition_month)
     if avgs_m:
+        st.markdown("**Nutrition**")
         n1, n2, n3, n4 = st.columns(4)
         n1.metric("Avg Calories", f"{avgs_m['calories']:.0f} kcal",
                   delta=f"{avgs_m['n']} days logged", delta_color="off")
         n2.metric("Avg Protein", f"{avgs_m['protein']:.0f} g")
         n3.metric("Avg Carbs",   f"{avgs_m['carbs']:.0f} g")
         n4.metric("Avg Fat",     f"{avgs_m['fat']:.0f} g")
+
+    st.markdown("**Calorie Balance (30-day total)**")
+    render_calorie_balance(month_consumed, month_burned)
 
 # ── Chat (optional) ───────────────────────────────────────────────────────────
 
