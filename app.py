@@ -10,6 +10,7 @@ from strava_data import (
     get_activities_in_range,
 )
 from mfp_data import get_nutrition_for_date, get_nutrition_range
+from claude_chat import build_context, stream_response
 
 st.set_page_config(page_title="Health Dashboard", layout="wide", page_icon="🏃")
 
@@ -158,3 +159,33 @@ if all_week:
     st.markdown("---")
     for a in all_week:
         render_activity(a)
+
+st.divider()
+
+# ── Ask Claude ────────────────────────────────────────────────────────────────
+title_col, clear_col = st.columns([8, 1])
+title_col.subheader("Ask Claude")
+if clear_col.button("Clear chat", use_container_width=True):
+    st.session_state.chat_messages = []
+    st.rerun()
+
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+
+for msg in st.session_state.chat_messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+if prompt := st.chat_input("Ask about your training or nutrition…"):
+    st.session_state.chat_messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    context = build_context(today, all_week, nutrition_today, nutrition_yesterday, nutrition_week)
+    api_messages = [{"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.chat_messages]
+
+    with st.chat_message("assistant"):
+        reply = st.write_stream(stream_response(api_messages, context))
+
+    st.session_state.chat_messages.append({"role": "assistant", "content": reply})
