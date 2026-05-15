@@ -325,6 +325,15 @@ with st.spinner("Loading…"):
 today_acts     = [a for a in all_week if a.get("start_date_local", "")[:10] == str(today)]
 yesterday_acts = [a for a in all_week if a.get("start_date_local", "")[:10] == str(yesterday)]
 
+# Per-day lookups used by the 7-day tab
+acts_by_day: dict[str, list[dict]] = {}
+for _a in all_week:
+    _day = _a.get("start_date_local", "")[:10]
+    if _day:
+        acts_by_day.setdefault(_day, []).append(_a)
+
+nutr_by_day: dict[str, dict] = {d["date"]: d for d in nutrition_week}
+
 today_burned     = _total_burned(today_acts)
 yesterday_burned = _total_burned(yesterday_acts)
 week_burned      = _total_burned(all_week)
@@ -376,38 +385,47 @@ with tab1:
 # ── Tab 2: Last 7 Days ────────────────────────────────────────────────────────
 
 with tab2:
-    st.subheader(f"Last 7 Days · {week_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+    # ── Weekly summary row ───────────────────────────────────────────────────
+    runs_w = [a for a in all_week if a.get("sport_type") == "Run"]
+    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    s1.metric("Days", 7)
+    s2.metric("Activities", len(all_week))
+    s3.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs_w)))
+    s4.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_week)))
+    s5.metric("Total Burned", f"{week_burned} kcal")
+    s6.metric("Total Consumed", f"{week_consumed} kcal")
 
-    runs  = [a for a in all_week if a.get("sport_type") == "Run"]
-    avg_burned_week = round(week_burned / 7)
+    st.divider()
 
-    st.markdown("**Exercise**")
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Activities", len(all_week))
-    m2.metric("Runs", len(runs))
-    m3.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs)))
-    m4.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_week)))
-    m5.metric("Calories Burned", f"{week_burned} kcal")
+    # ── Per-day breakdown ────────────────────────────────────────────────────
+    for i in range(7):
+        d = today - timedelta(days=i)
+        d_str = d.isoformat()
+        day_acts = acts_by_day.get(d_str, [])
+        day_nutr = nutr_by_day.get(d_str, {"daily_totals": {}, "goals": {}})
+        day_burned   = _total_burned(day_acts)
+        day_consumed = _consumed(day_nutr)
 
-    avgs = _nutrition_avgs(nutrition_week)
-    if avgs:
-        st.markdown("**Nutrition**")
-        n1, n2, n3, n4 = st.columns(4)
-        n1.metric("Avg Calories", f"{avgs['calories']:.0f} kcal",
-                  delta=f"{avgs['n']} days logged", delta_color="off")
-        n2.metric("Avg Protein", f"{avgs['protein']:.0f} g")
-        n3.metric("Avg Carbs",   f"{avgs['carbs']:.0f} g")
-        n4.metric("Avg Fat",     f"{avgs['fat']:.0f} g")
+        label = "Today" if i == 0 else ("Yesterday" if i == 1 else d.strftime("%A"))
+        st.subheader(f"{label} · {d.strftime('%b %d')}")
 
-    st.markdown("**Calorie Balance (7-day total)**")
-    render_calorie_balance(week_consumed, week_burned)
+        ex_col, nutr_col = st.columns(2)
+        with ex_col:
+            st.markdown("**Exercise**")
+            if day_acts:
+                for a in day_acts:
+                    render_activity(a)
+            else:
+                st.caption("No activities")
+        with nutr_col:
+            st.markdown("**Nutrition**")
+            render_nutrition(day_nutr)
 
-    if all_week:
-        st.divider()
-        for a in all_week:
-            render_activity(a)
-    else:
-        st.caption("No activities this week")
+        st.markdown("**Calorie Balance**")
+        render_calorie_balance(day_consumed, day_burned)
+
+        if i < 6:
+            st.divider()
 
 # ── Tab 3: Last 30 Days ───────────────────────────────────────────────────────
 
