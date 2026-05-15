@@ -23,6 +23,23 @@ else
   fi
 fi
 
+# Load ANTHROPIC_API_KEY from .env if not already in environment
+if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -f ".env" ]; then
+  while IFS='=' read -r key val; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" ]] && continue
+    export "$key"="$val"
+  done < .env
+fi
+
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "  Claude  ✗  ANTHROPIC_API_KEY not set"
+  echo "             add it to health_dashboard/.env:  ANTHROPIC_API_KEY=sk-ant-..."
+  WARN=1
+else
+  echo "  Claude  ✓"
+fi
+
 MFP_OK=0
 if [ ! -f "$MFP_CACHE" ]; then
   echo "  MFP     ✗  not authenticated"

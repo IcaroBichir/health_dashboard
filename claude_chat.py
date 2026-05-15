@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import os
 from datetime import date
+from pathlib import Path
 from typing import Iterator
 
 import anthropic
+
+# Load .env from the dashboard directory (same pattern as mcp_strava / mcp_myfitnesspal)
+_ENV_FILE = Path(__file__).parent / ".env"
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 _MODEL = "claude-sonnet-4-6"
 
