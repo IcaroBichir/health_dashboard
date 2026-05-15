@@ -21,10 +21,13 @@ st.set_page_config(page_title="Health Dashboard", layout="wide", page_icon="🏃
 today = date.today()
 yesterday = today - timedelta(days=1)
 week_start = today - timedelta(days=6)
+month_start = today - timedelta(days=29)
 
+
+# ── Data fetching ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_week(start: date, end: date) -> list[dict]:
+def fetch_activities(start: date, end: date) -> list[dict]:
     return get_activities_in_range(start, end)
 
 
@@ -34,140 +37,197 @@ def fetch_nutrition(d: date) -> dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_nutrition_week(start: date, end: date) -> list[dict]:
+def fetch_nutrition_range(start: date, end: date) -> list[dict]:
     return get_nutrition_range(start, end)
+
+
+# ── Rendering helpers ─────────────────────────────────────────────────────────
+
+def _activity_stats(a: dict) -> str:
+    sport = a.get("sport_type", "")
+    dist = a.get("distance")
+    duration = a.get("moving_time")
+    hr = a.get("average_heartrate")
+    parts = []
+    if dist:
+        parts.append(fmt_distance(dist))
+    if duration:
+        parts.append(fmt_duration(duration))
+    if dist and duration:
+        if sport == "Run":
+            parts.append(fmt_pace(dist, duration))
+        elif sport in ("Ride", "VirtualRide"):
+            parts.append(fmt_speed(a.get("average_speed")))
+    if hr:
+        parts.append(f"{hr:.0f} bpm")
+    return "  ·  ".join(parts)
 
 
 def render_activity(a: dict) -> None:
     sport = a.get("sport_type", "Other")
     emoji = SPORT_EMOJI.get(sport, "⚡")
-    dist = a.get("distance")
-    duration = a.get("moving_time")
-    hr = a.get("average_heartrate")
-    elev = a.get("total_elevation_gain", 0)
+    name = a.get("name", sport)
     time_str = a.get("start_date_local", "")[:16].replace("T", " ")
+    stats = _activity_stats(a)
 
     with st.container(border=True):
-        st.markdown(f"**{emoji} {a.get('name', sport)}**")
-        st.caption(time_str)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Distance", fmt_distance(dist))
-        c2.metric("Time", fmt_duration(duration))
-        if sport == "Run":
-            c3.metric("Pace", fmt_pace(dist, duration))
-        elif sport in ("Ride", "VirtualRide"):
-            c3.metric("Speed", fmt_speed(a.get("average_speed")))
-        else:
-            c3.metric("Elev.", f"{elev:.0f} m")
-        c4.metric("HR", f"{hr:.0f} bpm" if hr else "—")
+        left, right = st.columns([2, 3])
+        left.markdown(f"**{emoji} {name}**")
+        left.caption(time_str)
+        if stats:
+            right.caption(stats)
 
 
-def render_section(title: str, activities: list[dict]) -> None:
-    st.subheader(title)
-    if not activities:
-        st.caption("No activities")
-        return
-    for a in activities:
-        render_activity(a)
-
-
-def render_nutrition(data: dict, title: str) -> None:
+def render_nutrition(data: dict) -> None:
     totals = data.get("daily_totals", {})
     goals = data.get("goals", {})
-    st.subheader(title)
     if not totals:
-        st.caption("No nutrition data")
+        st.caption("No nutrition logged")
         return
     calories = totals.get("calories", 0)
     cal_goal = goals.get("calories", 0)
     protein = totals.get("protein", 0)
     carbs = totals.get("carbohydrates", 0)
     fat = totals.get("fat", 0)
+
     with st.container(border=True):
         remaining = round(cal_goal - calories) if cal_goal else None
-        delta_str = f"{remaining:+.0f} remaining" if remaining is not None else None
-        # Positive remaining = good (under goal); negative = over goal
+        delta_str = f"{remaining:+.0f} rem" if remaining is not None else None
         delta_color = "normal" if (remaining is None or remaining >= 0) else "inverse"
-        cal_label = f"{calories:.0f} / {cal_goal:.0f} kcal" if cal_goal else f"{calories:.0f} kcal"
+        cal_label = f"{calories:.0f} / {cal_goal:.0f}" if cal_goal else f"{calories:.0f} kcal"
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Calories", cal_label, delta=delta_str, delta_color=delta_color)
-        c2.metric("Protein", f"{protein:.0f} g", delta=f"goal {goals['protein']:.0f} g" if "protein" in goals else None, delta_color="off")
-        c3.metric("Carbs", f"{carbs:.0f} g", delta=f"goal {goals['carbohydrates']:.0f} g" if "carbohydrates" in goals else None, delta_color="off")
-        c4.metric("Fat", f"{fat:.0f} g", delta=f"goal {goals['fat']:.0f} g" if "fat" in goals else None, delta_color="off")
+        c2.metric("Protein", f"{protein:.0f} g",
+                  delta=f"goal {goals['protein']:.0f}" if "protein" in goals else None,
+                  delta_color="off")
+        c3.metric("Carbs", f"{carbs:.0f} g")
+        c4.metric("Fat", f"{fat:.0f} g")
+
+
+def _nutrition_avgs(days: list[dict]) -> dict | None:
+    with_data = [d for d in days if d.get("daily_totals")]
+    if not with_data:
+        return None
+    n = len(with_data)
+    return {
+        "n": n,
+        "calories": sum(d["daily_totals"].get("calories", 0) for d in with_data) / n,
+        "protein":  sum(d["daily_totals"].get("protein", 0) for d in with_data) / n,
+        "carbs":    sum(d["daily_totals"].get("carbohydrates", 0) for d in with_data) / n,
+        "fat":      sum(d["daily_totals"].get("fat", 0) for d in with_data) / n,
+    }
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
-st.title("Health Dashboard")
-st.caption(f"{today.strftime('%A, %B %d, %Y')}")
 
-hcol, _ = st.columns([1, 7])
-if hcol.button("↺  Refresh", use_container_width=True):
+hdr, _, ref = st.columns([5, 3, 1])
+hdr.title("Health Dashboard")
+hdr.caption(today.strftime("%A, %B %d, %Y"))
+if ref.button("↺ Refresh", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-st.divider()
-
 # ── Fetch ─────────────────────────────────────────────────────────────────────
-with st.spinner("Loading activities..."):
-    all_week = fetch_week(week_start, today)
 
-with st.spinner("Loading nutrition..."):
-    nutrition_today = fetch_nutrition(today)
+with st.spinner("Loading…"):
+    all_week  = fetch_activities(week_start, today)
+    all_month = fetch_activities(month_start, today)
+    nutrition_today     = fetch_nutrition(today)
     nutrition_yesterday = fetch_nutrition(yesterday)
-    nutrition_week = fetch_nutrition_week(week_start, today)
+    nutrition_week  = fetch_nutrition_range(week_start, today)
+    nutrition_month = fetch_nutrition_range(month_start, today)
 
-today_acts = [a for a in all_week if a.get("start_date_local", "")[:10] == str(today)]
+today_acts     = [a for a in all_week if a.get("start_date_local", "")[:10] == str(today)]
 yesterday_acts = [a for a in all_week if a.get("start_date_local", "")[:10] == str(yesterday)]
 
-# ── Today / Yesterday ─────────────────────────────────────────────────────────
-col_today, col_yesterday = st.columns(2)
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 
-with col_today:
-    render_section(f"Today  ·  {today.strftime('%b %d')}", today_acts)
-    render_nutrition(nutrition_today, "Nutrition")
+tab1, tab2, tab3 = st.tabs(["Today & Yesterday", "Last 7 Days", "Last 30 Days"])
 
-with col_yesterday:
-    render_section(f"Yesterday  ·  {yesterday.strftime('%b %d')}", yesterday_acts)
-    render_nutrition(nutrition_yesterday, "Nutrition")
+# ── Tab 1: Today & Yesterday ──────────────────────────────────────────────────
 
-st.divider()
+with tab1:
+    col_today, col_yesterday = st.columns(2)
 
-# ── Last 7 Days ───────────────────────────────────────────────────────────────
-st.subheader(f"Last 7 Days  ·  {week_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+    with col_today:
+        st.subheader(f"Today · {today.strftime('%b %d')}")
+        if today_acts:
+            for a in today_acts:
+                render_activity(a)
+        else:
+            st.caption("No activities yet")
+        st.markdown("**Nutrition**")
+        render_nutrition(nutrition_today)
 
-if all_week:
-    runs = [a for a in all_week if a.get("sport_type") == "Run"]
+    with col_yesterday:
+        st.subheader(f"Yesterday · {yesterday.strftime('%b %d')}")
+        if yesterday_acts:
+            for a in yesterday_acts:
+                render_activity(a)
+        else:
+            st.caption("No activities")
+        st.markdown("**Nutrition**")
+        render_nutrition(nutrition_yesterday)
+
+# ── Tab 2: Last 7 Days ────────────────────────────────────────────────────────
+
+with tab2:
+    st.subheader(f"Last 7 Days · {week_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+
+    runs  = [a for a in all_week if a.get("sport_type") == "Run"]
+    lifts = [a for a in all_week if a.get("sport_type") == "WeightTraining"]
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Activities", len(all_week))
     m2.metric("Runs", len(runs))
     m3.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs)))
     m4.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_week)))
-else:
-    st.caption("No activities in the last 7 days")
 
-days_with_data = [d for d in nutrition_week if d.get("daily_totals")]
-if days_with_data:
-    n = len(days_with_data)
-    avg_cal = sum(d["daily_totals"].get("calories", 0) for d in days_with_data) / n
-    avg_protein = sum(d["daily_totals"].get("protein", 0) for d in days_with_data) / n
-    avg_carbs = sum(d["daily_totals"].get("carbohydrates", 0) for d in days_with_data) / n
-    avg_fat = sum(d["daily_totals"].get("fat", 0) for d in days_with_data) / n
-    cal_goal = next((d["goals"].get("calories") for d in days_with_data if d.get("goals")), None)
-    n1, n2, n3, n4 = st.columns(4)
-    n1.metric("Avg Calories", f"{avg_cal:.0f} kcal", delta=f"goal {cal_goal:.0f}" if cal_goal else None, delta_color="off")
-    n2.metric("Avg Protein", f"{avg_protein:.0f} g")
-    n3.metric("Avg Carbs", f"{avg_carbs:.0f} g")
-    n4.metric("Avg Fat", f"{avg_fat:.0f} g")
+    avgs = _nutrition_avgs(nutrition_week)
+    if avgs:
+        n1, n2, n3, n4 = st.columns(4)
+        n1.metric("Avg Calories", f"{avgs['calories']:.0f} kcal",
+                  delta=f"{avgs['n']} days logged", delta_color="off")
+        n2.metric("Avg Protein", f"{avgs['protein']:.0f} g")
+        n3.metric("Avg Carbs",   f"{avgs['carbs']:.0f} g")
+        n4.metric("Avg Fat",     f"{avgs['fat']:.0f} g")
 
-if all_week:
-    st.markdown("---")
-    for a in all_week:
-        render_activity(a)
+    if all_week:
+        st.divider()
+        for a in all_week:
+            render_activity(a)
+    else:
+        st.caption("No activities this week")
+
+# ── Tab 3: Last 30 Days ───────────────────────────────────────────────────────
+
+with tab3:
+    st.subheader(f"Last 30 Days · {month_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+
+    runs_m  = [a for a in all_month if a.get("sport_type") == "Run"]
+    rides_m = [a for a in all_month if a.get("sport_type") in ("Ride", "VirtualRide")]
+    lifts_m = [a for a in all_month if a.get("sport_type") == "WeightTraining"]
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Activities", len(all_month))
+    m2.metric("Run Distance", fmt_distance(sum(a.get("distance", 0) for a in runs_m)))
+    m3.metric("Total Time", fmt_duration(sum(a.get("moving_time", 0) for a in all_month)))
+    m4.metric("Runs / Rides / Lifts", f"{len(runs_m)} / {len(rides_m)} / {len(lifts_m)}")
+
+    avgs_m = _nutrition_avgs(nutrition_month)
+    if avgs_m:
+        n1, n2, n3, n4 = st.columns(4)
+        n1.metric("Avg Calories", f"{avgs_m['calories']:.0f} kcal",
+                  delta=f"{avgs_m['n']} days logged", delta_color="off")
+        n2.metric("Avg Protein", f"{avgs_m['protein']:.0f} g")
+        n3.metric("Avg Carbs",   f"{avgs_m['carbs']:.0f} g")
+        n4.metric("Avg Fat",     f"{avgs_m['fat']:.0f} g")
+
+# ── Chat (optional) ───────────────────────────────────────────────────────────
 
 if _CHAT_ENABLED:
     st.divider()
-
-    # ── Ask Claude ────────────────────────────────────────────────────────────
     title_col, clear_col = st.columns([8, 1])
     title_col.subheader("Ask Claude")
     if clear_col.button("Clear chat", use_container_width=True):
@@ -189,8 +249,6 @@ if _CHAT_ENABLED:
         context = build_context(today, all_week, nutrition_today, nutrition_yesterday, nutrition_week)
         api_messages = [{"role": m["role"], "content": m["content"]}
                         for m in st.session_state.chat_messages]
-
         with st.chat_message("assistant"):
             reply = st.write_stream(stream_response(api_messages, context))
-
         st.session_state.chat_messages.append({"role": "assistant", "content": reply})
