@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 SPORT_EMOJI: dict[str, str] = {
     "Run": "🏃",
@@ -15,20 +15,7 @@ SPORT_EMOJI: dict[str, str] = {
 
 def get_activities_in_range(start: date, end: date) -> list[dict]:
     from strava_mcp.client import StravaClient
-
-    client = StravaClient()
-    # Widen timestamps by 1 day on each side so UTC-vs-local timezone edge cases
-    # don't silently drop activities; we filter precisely by start_date_local below.
-    after_ts = int(datetime(start.year, start.month, start.day,
-                            tzinfo=timezone.utc).timestamp()) - 86400
-    before_ts = int(datetime(end.year, end.month, end.day, 23, 59, 59,
-                             tzinfo=timezone.utc).timestamp()) + 86400
-
-    raw = client.list_activities(after=after_ts, before=before_ts, per_page=200)
-
-    s, e = str(start), str(end)
-    filtered = [a for a in raw if s <= a.get("start_date_local", "")[:10] <= e]
-    return sorted(filtered, key=lambda a: a.get("start_date_local", ""), reverse=True)
+    return StravaClient().list_activities_in_range(start, end)
 
 
 def fmt_distance(meters) -> str:
