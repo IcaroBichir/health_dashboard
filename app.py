@@ -576,7 +576,7 @@ def _render_eval_box(period: str, runs: list[dict], metrics: dict) -> None:
         is_cached = evaluation_is_cached(period)
 
         if is_cached:
-            text = get_run_evaluation(period, "", force=False)
+            text = get_run_evaluation(period)
             st.markdown(text)
             st.divider()
             btn_col, _ = st.columns([1, 3])
