@@ -14,6 +14,18 @@ from strava_data import (
     get_activities_in_range,
 )
 from mfp_data import get_nutrition_for_date, get_nutrition_range
+from running_data import (
+    runs_in_window,
+    compute_run_metrics,
+    build_evaluation_context,
+    get_detailed_run,
+    fmt_splits,
+)
+from claude_eval import (
+    get_run_evaluation,
+    evaluation_is_cached,
+    invalidate_run_evaluations,
+)
 
 _CHAT_ENABLED = os.environ.get("ENABLE_CLAUDE_CHAT", "0").strip() == "1"
 if _CHAT_ENABLED:
@@ -24,6 +36,7 @@ st.set_page_config(page_title="Health Dashboard", layout="wide", page_icon="🏃
 today = date.today()
 yesterday = today - timedelta(days=1)
 week_start = today - timedelta(days=6)
+fifteen_start = today - timedelta(days=14)
 month_start = today - timedelta(days=29)
 
 _CONFIG_PATH = Path(__file__).parent / ".streamlit" / "config.toml"
@@ -297,6 +310,11 @@ if st.session_state.get("confirm_api_pull"):
         label_visibility="collapsed",
     )
     start_of_range = _REFRESH_RANGES[selected_range]
+    regen_evals = st.checkbox(
+        "Regenerate AI coach evaluations (Running tab)",
+        value=False,
+        help="Invalidates cached Claude evaluations so they are regenerated on next view.",
+    )
     st.warning(
         f"This will make live API calls to **Strava** and **MyFitnessPal** "
         f"for **{selected_range}**, bypassing the local cache. "
@@ -307,6 +325,8 @@ if st.session_state.get("confirm_api_pull"):
         st.session_state.pop("confirm_api_pull", None)
         with st.spinner(f"Clearing cache and fetching {selected_range} from API…"):
             force_api_refresh(start_of_range)
+            if regen_evals:
+                invalidate_run_evaluations()
         st.rerun()
     if no_col.button("Cancel", use_container_width=True):
         st.session_state.pop("confirm_api_pull", None)
@@ -349,7 +369,7 @@ month_consumed     = round(sum(_consumed(d) for d in nutrition_month))
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3 = st.tabs(["Today & Yesterday", "Last 7 Days", "Last 30 Days"])
+tab1, tab2, tab3, tab4 = st.tabs(["Today & Yesterday", "Last 7 Days", "Last 30 Days", "🏃 Running"])
 
 # ── Tab 1: Today & Yesterday ──────────────────────────────────────────────────
 
@@ -457,6 +477,200 @@ with tab3:
 
     st.markdown("**Calorie Balance (30-day total)**")
     render_calorie_balance(month_consumed, month_burned)
+
+# ── Tab 4: Running ────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_detailed_run(activity_id: int) -> dict:
+    return get_detailed_run(activity_id)
+
+
+def _fmt_metric_pace(sec_per_km: float) -> str:
+    if not sec_per_km:
+        return "—"
+    m, s = divmod(int(sec_per_km), 60)
+    return f"{m}:{s:02d} /km"
+
+
+def _render_run_metrics(metrics: dict) -> None:
+    if not metrics:
+        st.caption("No runs in this period.")
+        return
+
+    r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
+    r1c1.metric("Runs", metrics["count"])
+    r1c2.metric("Total Distance", fmt_distance(metrics["total_distance"]))
+    r1c3.metric("Avg Distance", fmt_distance(metrics["avg_distance"]))
+    r1c4.metric("Longest Run", fmt_distance(metrics["longest_run"]))
+    r1c5.metric("Total Time", fmt_duration(metrics["total_moving_time"]))
+
+    r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns(5)
+    r2c1.metric("Avg Pace", _fmt_metric_pace(metrics["avg_pace"]))
+    r2c2.metric("Best Pace", _fmt_metric_pace(metrics["best_pace"]))
+    r2c3.metric("Total Elev Gain", f"{metrics['total_elevation']:.0f} m" if metrics["total_elevation"] else "—")
+    r2c4.metric("Avg Elev / Run", f"{metrics['avg_elevation']:.0f} m" if metrics["avg_elevation"] else "—")
+    r2c5.metric("Unique Days", metrics["unique_days"])
+
+    r3c1, r3c2, r3c3, r3c4, r3c5 = st.columns(5)
+    r3c1.metric("Avg HR", f"{metrics['avg_hr']:.0f} bpm" if metrics["avg_hr"] else "—")
+    r3c2.metric("Max HR", f"{metrics['max_hr']} bpm" if metrics["max_hr"] else "—")
+    r3c3.metric("Total Calories", f"{metrics['total_calories']} kcal" if metrics["total_calories"] else "—")
+    r3c4.metric("Avg Calories", f"{metrics['avg_calories']} kcal" if metrics["avg_calories"] else "—")
+    r3c5_parts = []
+    if metrics["avg_suffer"]:
+        r3c5_parts.append(f"Suffer: {metrics['avg_suffer']:.1f}")
+    if metrics["total_prs"]:
+        r3c5_parts.append(f"PRs: {metrics['total_prs']}")
+    if r3c5_parts:
+        r3c5.metric("Suffer / PRs", " · ".join(r3c5_parts))
+    elif metrics["total_achievements"]:
+        r3c5.metric("Achievements", metrics["total_achievements"])
+
+
+def _render_eval_box(period: str, runs: list[dict], metrics: dict) -> None:
+    """Render the Claude coach evaluation box with cache-aware generate/regenerate."""
+    st.markdown("**🤖 AI Coach Evaluation**")
+    with st.container(border=True):
+        is_cached = evaluation_is_cached(period)
+        btn_label = "↺ Regenerate" if is_cached else "✨ Generate evaluation"
+        btn_col, _ = st.columns([1, 3])
+        trigger = btn_col.button(btn_label, key=f"eval_btn_{period}", use_container_width=True)
+
+        if trigger or is_cached:
+            ctx = build_evaluation_context(period, runs, metrics, today)
+            try:
+                need_spinner = trigger or not is_cached
+                if need_spinner:
+                    with st.spinner("Asking Claude…"):
+                        text = get_run_evaluation(period, ctx, force=trigger)
+                else:
+                    text = get_run_evaluation(period, ctx, force=False)
+                st.markdown(text)
+            except Exception as exc:
+                st.warning(f"Could not generate evaluation: {exc}", icon="⚠️")
+        else:
+            st.caption("Click **Generate evaluation** to get an AI coaching analysis for this period.")
+
+
+def _render_detailed_run_card(a: dict) -> None:
+    """Render one detailed run activity inside an expander."""
+    name = a.get("name", "Run")
+    date_str = a.get("start_date_local", "")[:10]
+    time_str = a.get("start_date_local", "")[:16].replace("T", " ")
+    dist = a.get("distance", 0) or 0
+    move = a.get("moving_time", 0) or 0
+    elapsed = a.get("elapsed_time", 0) or 0
+    hr_avg = a.get("average_heartrate")
+    hr_max = a.get("max_heartrate")
+    elev = a.get("total_elevation_gain") or 0
+    suffer = a.get("suffer_score")
+    cals = a.get("calories") or 0
+    prs = a.get("pr_count") or 0
+    achievements = a.get("achievement_count") or 0
+    avg_speed = a.get("average_speed") or 0
+    max_speed = a.get("max_speed") or 0
+
+    label_parts = [f"🏃 {name}", date_str]
+    if dist:
+        label_parts.append(fmt_distance(dist))
+    if dist and move:
+        label_parts.append(fmt_pace(dist, move))
+
+    with st.expander(" · ".join(label_parts)):
+        st.caption(f"Started {time_str}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Distance", fmt_distance(dist))
+        c2.metric("Moving Time", fmt_duration(move))
+        c3.metric("Pace", fmt_pace(dist, move))
+        c4.metric("Avg Speed", fmt_speed(avg_speed) if avg_speed else "—")
+
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Avg HR", f"{hr_avg:.0f} bpm" if hr_avg else "—")
+        c6.metric("Max HR", f"{hr_max:.0f} bpm" if hr_max else "—")
+        c7.metric("Elapsed Time", fmt_duration(elapsed))
+        c8.metric("Max Speed", fmt_speed(max_speed) if max_speed else "—")
+
+        c9, c10, c11, c12 = st.columns(4)
+        c9.metric("Elevation Gain", f"{elev:.0f} m" if elev else "—")
+        c10.metric("Calories", f"{cals:.0f} kcal" if cals else "—")
+        c11.metric("Suffer Score", suffer if suffer else "—")
+        prs_label = f"{prs} PR{'s' if prs > 1 else ''}" if prs else "—"
+        c12.metric("PRs / Achievements", f"{prs_label} / {achievements}")
+
+        # Fetch detailed data for cadence and splits
+        act_id = a.get("id")
+        if act_id:
+            try:
+                detailed = fetch_detailed_run(act_id)
+                cadence = detailed.get("average_cadence")
+                perc_effort = detailed.get("perceived_exertion")
+                avg_watts = detailed.get("average_watts")
+                splits = detailed.get("splits_metric") or []
+
+                extra_cols = [x for x in [
+                    ("Avg Cadence", f"{cadence:.0f} spm" if cadence else None),
+                    ("Perceived Effort", str(perc_effort) if perc_effort else None),
+                    ("Avg Power", f"{avg_watts:.0f} W" if avg_watts else None),
+                ] if x[1]]
+
+                if extra_cols:
+                    ex_cols = st.columns(len(extra_cols))
+                    for col, (label, val) in zip(ex_cols, extra_cols):
+                        col.metric(label, val)
+
+                if splits:
+                    rows = fmt_splits(splits)
+                    if rows:
+                        st.markdown("**Per-km Splits**")
+                        headers = list(rows[0].keys())
+                        col_widths = [1] * len(headers)
+                        hcols = st.columns(col_widths)
+                        for hcol, h in zip(hcols, headers):
+                            hcol.caption(h.upper())
+                        for row in rows:
+                            rcols = st.columns(col_widths)
+                            for rcol, h in zip(rcols, headers):
+                                rcol.write(row.get(h, ""))
+            except Exception:
+                pass
+
+
+with tab4:
+    st.subheader("Running")
+
+    runs_30d = runs_in_window(all_month, month_start)
+    runs_15d = runs_in_window(all_month, fifteen_start)
+    runs_7d  = runs_in_window(all_month, week_start)
+
+    metrics_30d = compute_run_metrics(runs_30d)
+    metrics_15d = compute_run_metrics(runs_15d)
+    metrics_7d  = compute_run_metrics(runs_7d)
+
+    # ── 30-day summary ────────────────────────────────────────────────────────
+    st.markdown(f"### 📅 Last 30 Days · {month_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+    _render_run_metrics(metrics_30d)
+    _render_eval_box("30d", runs_30d, metrics_30d)
+
+    st.divider()
+
+    # ── 15-day summary ────────────────────────────────────────────────────────
+    st.markdown(f"### 📅 Last 15 Days · {fifteen_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+    _render_run_metrics(metrics_15d)
+    _render_eval_box("15d", runs_15d, metrics_15d)
+
+    st.divider()
+
+    # ── 7-day summary + individual runs ───────────────────────────────────────
+    st.markdown(f"### 📅 Last 7 Days · {week_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+    _render_run_metrics(metrics_7d)
+
+    if runs_7d:
+        st.markdown("**Individual Runs**")
+        for run in sorted(runs_7d, key=lambda x: x.get("start_date_local", ""), reverse=True):
+            _render_detailed_run_card(run)
+
+    _render_eval_box("7d", runs_7d, metrics_7d)
 
 # ── Chat (optional) ───────────────────────────────────────────────────────────
 
