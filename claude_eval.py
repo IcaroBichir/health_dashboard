@@ -9,31 +9,48 @@ _EVAL_TTL = 28800  # 8 hours
 
 _cache = DashboardCache()
 
+# ── Running evaluations ───────────────────────────────────────────────────────
 
-def _eval_cache_key(period: str) -> str:
+def _run_key(period: str) -> str:
     return f"run_eval:{period}:{date.today().isoformat()}"
 
 
-def get_run_evaluation(period: str, context: str = "", force: bool = False) -> str:
-    """Return the cached evaluation for a period.
-
-    Evaluations are written to the cache externally (by Claude Code via
-    write_evaluation_to_cache). This function is read-only — it never
-    calls an LLM directly.
-    """
-    cache_key = _eval_cache_key(period)
-    cached = _cache.get(cache_key)
-    return cached or ""
+def get_run_evaluation(period: str) -> str:
+    return _cache.get(_run_key(period)) or ""
 
 
 def write_evaluation_to_cache(period: str, text: str) -> None:
-    """Write a Claude-generated evaluation into the cache (called by Claude Code)."""
-    _cache.set(_eval_cache_key(period), text, _EVAL_TTL)
+    _cache.set(_run_key(period), text, _EVAL_TTL)
 
 
 def evaluation_is_cached(period: str) -> bool:
-    return bool(_cache.get(_eval_cache_key(period)))
+    return bool(_cache.get(_run_key(period)))
 
+
+# ── Correlation (nutrition × exercise) evaluations ───────────────────────────
+
+def _corr_key(period: str) -> str:
+    return f"corr_eval:{period}:{date.today().isoformat()}"
+
+
+def get_correlation_evaluation(period: str) -> str:
+    return _cache.get(_corr_key(period)) or ""
+
+
+def write_correlation_evaluation_to_cache(period: str, text: str) -> None:
+    _cache.set(_corr_key(period), text, _EVAL_TTL)
+
+
+def correlation_evaluation_is_cached(period: str) -> bool:
+    return bool(_cache.get(_corr_key(period)))
+
+
+# ── Invalidation ──────────────────────────────────────────────────────────────
 
 def invalidate_run_evaluations() -> None:
     _cache.delete_like("run_eval:%")
+
+
+def invalidate_all_evaluations() -> None:
+    _cache.delete_like("run_eval:%")
+    _cache.delete_like("corr_eval:%")

@@ -25,6 +25,14 @@ from claude_eval import (
     get_run_evaluation,
     evaluation_is_cached,
     invalidate_run_evaluations,
+    get_correlation_evaluation,
+    write_correlation_evaluation_to_cache,
+    correlation_evaluation_is_cached,
+    invalidate_all_evaluations,
+)
+from correlation_data import (
+    compute_correlation_metrics,
+    build_correlation_context,
 )
 
 _CHAT_ENABLED = os.environ.get("ENABLE_CLAUDE_CHAT", "0").strip() == "1"
@@ -326,7 +334,7 @@ if st.session_state.get("confirm_api_pull"):
         with st.spinner(f"Clearing cache and fetching {selected_range} from API…"):
             force_api_refresh(start_of_range)
             if regen_evals:
-                invalidate_run_evaluations()
+                invalidate_all_evaluations()
         st.rerun()
     if no_col.button("Cancel", use_container_width=True):
         st.session_state.pop("confirm_api_pull", None)
@@ -367,9 +375,31 @@ yesterday_consumed = _consumed(nutrition_yesterday)
 week_consumed      = round(sum(_consumed(d) for d in nutrition_week))
 month_consumed     = round(sum(_consumed(d) for d in nutrition_month))
 
+# ── Nutrition availability check (determines if correlation tab is shown) ─────
+
+def _has_nutrition(nutrition_list: list[dict]) -> bool:
+    return any(d.get("daily_totals") for d in nutrition_list)
+
+
+# If the regular fetch returned no data, try a direct (cache-bypassing) fetch.
+_nutrition_month = nutrition_month
+if not _has_nutrition(_nutrition_month):
+    try:
+        _nutrition_month = get_nutrition_range(month_start, today)
+    except Exception:
+        pass
+
+_show_correlation_tab = _has_nutrition(_nutrition_month)
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(["Today & Yesterday", "Last 7 Days", "Last 30 Days", "🏃 Running"])
+_tab_names = ["Today & Yesterday", "Last 7 Days", "Last 30 Days", "🏃 Running"]
+if _show_correlation_tab:
+    _tab_names.append("🔗 Nutrition × Exercise")
+
+_tabs = st.tabs(_tab_names)
+tab1, tab2, tab3, tab4 = _tabs[:4]
+tab5 = _tabs[4] if _show_correlation_tab else None
 
 # ── Tab 1: Today & Yesterday ──────────────────────────────────────────────────
 
@@ -699,6 +729,126 @@ with tab4:
     st.markdown(f"### 📅 Last 30 Days · {month_start.strftime('%b %d')} – {today.strftime('%b %d')}")
     _render_run_metrics(metrics_30d)
     _render_eval_box("30d", runs_30d, metrics_30d)
+
+# ── Tab 5: Nutrition × Exercise (conditional) ────────────────────────────────
+
+_CORR_SYSTEM = """\
+You are an expert sports nutritionist and endurance coach analyzing an athlete's \
+nutrition and exercise data. The athlete runs primarily in the morning (8–10am), \
+so the prior day's nutrition is the primary pre-workout fuel source. \
+Analyze: (1) how prior-day carbs, calories, and protein correlate with next-day \
+pace, HR, and suffer score; (2) calorie balance sustainability on hard training days; \
+(3) whether protein intake supports recovery between sessions; \
+(4) patterns in nutrition on workout days vs rest days. \
+Give 2-3 specific, data-driven recommendations. Reference actual dates and numbers \
+where patterns are clear. Write 4-6 short paragraphs. \
+Tone: direct, analytical — not generic nutrition advice.\
+"""
+
+_CORR_PENDING_DIR = Path.home() / ".config" / "health-dashboard" / "pending_corr_evals"
+
+
+def _corr_pending_path(period: str) -> Path:
+    return _CORR_PENDING_DIR / f"{period}.txt"
+
+
+def _render_corr_metrics(metrics: dict) -> None:
+    if not metrics.get("overlap_days"):
+        st.caption("No days found with both exercise and nutrition data.")
+        return
+
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    r1c1.metric("Days w/ Both", metrics["overlap_days"])
+    r1c2.metric("Workout Days", metrics["total_act_days"])
+    r1c3.metric("Nutrition Days", metrics["total_nutr_days"])
+    net = metrics["avg_net"]
+    r1c4.metric("Avg Net Balance", f"{net:+d} kcal",
+                delta="surplus" if net >= 0 else "deficit",
+                delta_color="normal" if net >= 0 else "inverse")
+
+    wo = metrics.get("workout_day_avg")
+    re = metrics.get("rest_day_avg")
+    if wo and re:
+        st.markdown("**Nutrition: workout days vs rest days**")
+        wc1, wc2, wc3, wc4 = st.columns(4)
+        wc1.metric("Calories (workout)", f"{wo['calories']:.0f} kcal",
+                   delta=f"{wo['calories'] - re['calories']:+.0f} vs rest", delta_color="off")
+        wc2.metric("Protein (workout)", f"{wo['protein']:.0f} g",
+                   delta=f"{wo['protein'] - re['protein']:+.0f} vs rest", delta_color="off")
+        wc3.metric("Carbs (workout)", f"{wo['carbs']:.0f} g",
+                   delta=f"{wo['carbs'] - re['carbs']:+.0f} vs rest", delta_color="off")
+        wc4.metric("Fat (workout)", f"{wo['fat']:.0f} g",
+                   delta=f"{wo['fat'] - re['fat']:+.0f} vs rest", delta_color="off")
+
+    if metrics["avg_consumed"] or metrics["avg_burned"]:
+        st.markdown("**Energy balance (workout days with nutrition data)**")
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric("Avg Consumed", f"{metrics['avg_consumed']} kcal")
+        ec2.metric("Avg Burned", f"{metrics['avg_burned']} kcal")
+        ec3.metric("Avg Net", f"{metrics['avg_net']:+d} kcal")
+
+
+def _render_corr_eval_box(period: str, metrics: dict) -> None:
+    st.markdown("**🤖 AI Coach Evaluation**")
+    with st.container(border=True):
+        is_cached = correlation_evaluation_is_cached(period)
+
+        if is_cached:
+            text = get_correlation_evaluation(period)
+            st.markdown(text)
+            st.divider()
+            btn_col, _ = st.columns([1, 3])
+            if btn_col.button("↺ Request new evaluation", key=f"corr_btn_{period}", use_container_width=True):
+                ctx = build_correlation_context(
+                    f"Last {period.replace('d', ' Days')}",
+                    metrics, today,
+                )
+                _CORR_PENDING_DIR.mkdir(parents=True, exist_ok=True)
+                _corr_pending_path(period).write_text(ctx)
+                from claude_eval import invalidate_all_evaluations
+                invalidate_all_evaluations()
+                st.info("Context saved. Ask Claude Code: **\"Generate my correlation evaluations\"**", icon="💬")
+        else:
+            pending = _corr_pending_path(period)
+            if pending.exists():
+                st.info("Context is ready. Ask Claude Code: **\"Generate my correlation evaluations\"**", icon="💬")
+            else:
+                btn_col, _ = st.columns([1, 3])
+                if btn_col.button("✨ Request evaluation", key=f"corr_btn_{period}", use_container_width=True):
+                    ctx = build_correlation_context(
+                        f"Last {period.replace('d', ' Days')}",
+                        metrics, today,
+                    )
+                    _CORR_PENDING_DIR.mkdir(parents=True, exist_ok=True)
+                    _corr_pending_path(period).write_text(ctx)
+                    st.info("Context saved. Ask Claude Code: **\"Generate my correlation evaluations\"**", icon="💬")
+                else:
+                    st.caption("Click **Request evaluation** — Claude Code will generate it from this session.")
+
+
+if tab5 is not None:
+    with tab5:
+        st.subheader("Nutrition × Exercise")
+
+        nutr_fifteen = [d for d in _nutrition_month
+                        if d["date"] >= fifteen_start.isoformat()]
+
+        corr_15d = compute_correlation_metrics(all_month, _nutrition_month, fifteen_start)
+        corr_30d = compute_correlation_metrics(all_month, _nutrition_month, month_start)
+
+        # ── 15-day section ────────────────────────────────────────────────────
+        st.markdown(f"### 📅 Last 15 Days · {fifteen_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+        _render_corr_metrics(corr_15d)
+        if corr_15d.get("overlap_days"):
+            _render_corr_eval_box("15d", corr_15d)
+
+        st.divider()
+
+        # ── 30-day section ────────────────────────────────────────────────────
+        st.markdown(f"### 📅 Last 30 Days · {month_start.strftime('%b %d')} – {today.strftime('%b %d')}")
+        _render_corr_metrics(corr_30d)
+        if corr_30d.get("overlap_days"):
+            _render_corr_eval_box("30d", corr_30d)
 
 # ── Chat (optional) ───────────────────────────────────────────────────────────
 
