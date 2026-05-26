@@ -4,6 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── Flag parsing ──────────────────────────────────────────────────────────────
+# --no-eval  skip running-evaluation generation at startup
+# All other flags are forwarded to streamlit
+
+SKIP_EVAL=0
+STREAMLIT_ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--no-eval" ]; then
+    SKIP_EVAL=1
+  else
+    STREAMLIT_ARGS+=("$arg")
+  fi
+done
+
 # ── Auth status checks ────────────────────────────────────────────────────────
 
 STRAVA_TOKENS="$HOME/.config/strava-mcp/tokens.json"
@@ -61,6 +75,25 @@ else
   fi
 fi
 
+# ── Running evaluations ───────────────────────────────────────────────────────
+
+if [ "$SKIP_EVAL" -eq 1 ]; then
+  echo "  Evals   —  skipped (--no-eval)"
+else
+  ALL_CACHED=$(.venv/bin/python -c "
+from claude_eval import evaluation_is_cached
+print('1' if all(evaluation_is_cached(p) for p in ['7d','15d','30d']) else '0')
+" 2>/dev/null || echo "0")
+
+  if [ "$ALL_CACHED" = "1" ]; then
+    echo "  Evals   ✓  (all cached)"
+  else
+    .venv/bin/python generate_evals.py || true
+  fi
+fi
+
+# ── Launch ────────────────────────────────────────────────────────────────────
+
 echo ""
 if [ "$WARN" -eq 1 ]; then
   echo "Dashboard starting (some data unavailable — see above)"
@@ -70,7 +103,5 @@ fi
 echo "  → http://localhost:8501"
 echo ""
 
-# Pass MFP_REQUIRED=1 when auth is confirmed fresh so mfp_data.py raises
-# visibly instead of silently swallowing errors mid-session.
 export MFP_REQUIRED=$MFP_OK
-exec .venv/bin/streamlit run app.py --server.headless false "$@"
+exec .venv/bin/streamlit run app.py --server.headless false "${STREAMLIT_ARGS[@]+"${STREAMLIT_ARGS[@]}"}"
