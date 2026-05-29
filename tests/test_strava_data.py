@@ -83,79 +83,36 @@ def _make_activity(date_str: str, sport: str = "Run") -> dict:
 
 
 @patch("strava_mcp.client.StravaClient")
-def test_activities_filtered_to_range(mock_cls):
+def test_get_activities_calls_list_activities_in_range(mock_cls):
+    """get_activities_in_range delegates directly to client.list_activities_in_range."""
     mock_client = MagicMock()
     mock_cls.return_value = mock_client
-    mock_client.list_activities.return_value = [
-        _make_activity("2026-05-01"),
-        _make_activity("2026-05-03"),
-        _make_activity("2026-05-07"),  # outside range
-    ]
+    mock_client.list_activities_in_range.return_value = []
 
-    result = get_activities_in_range(date(2026, 5, 1), date(2026, 5, 5))
+    start = date(2026, 5, 3)
+    end = date(2026, 5, 7)
+    get_activities_in_range(start, end)
 
-    dates = [a["start_date_local"][:10] for a in result]
-    assert "2026-05-01" in dates
-    assert "2026-05-03" in dates
-    assert "2026-05-07" not in dates
+    mock_client.list_activities_in_range.assert_called_once_with(start, end)
 
 
 @patch("strava_mcp.client.StravaClient")
-def test_activities_boundary_dates_included(mock_cls):
+def test_get_activities_returns_client_result_unchanged(mock_cls):
+    """get_activities_in_range passes the client's return value through without modification."""
     mock_client = MagicMock()
     mock_cls.return_value = mock_client
-    mock_client.list_activities.return_value = [
-        _make_activity("2026-05-01"),
-        _make_activity("2026-05-07"),
-    ]
+    expected = [_make_activity("2026-05-05"), _make_activity("2026-05-03")]
+    mock_client.list_activities_in_range.return_value = expected
 
     result = get_activities_in_range(date(2026, 5, 1), date(2026, 5, 7))
-
-    dates = [a["start_date_local"][:10] for a in result]
-    assert "2026-05-01" in dates
-    assert "2026-05-07" in dates
+    assert result is expected
 
 
 @patch("strava_mcp.client.StravaClient")
-def test_activities_sorted_newest_first(mock_cls):
+def test_get_activities_empty_result(mock_cls):
     mock_client = MagicMock()
     mock_cls.return_value = mock_client
-    mock_client.list_activities.return_value = [
-        _make_activity("2026-05-01"),
-        _make_activity("2026-05-05"),
-        _make_activity("2026-05-03"),
-    ]
-
-    result = get_activities_in_range(date(2026, 5, 1), date(2026, 5, 7))
-
-    dates = [a["start_date_local"][:10] for a in result]
-    assert dates == sorted(dates, reverse=True)
-
-
-@patch("strava_mcp.client.StravaClient")
-def test_activities_empty_range(mock_cls):
-    mock_client = MagicMock()
-    mock_cls.return_value = mock_client
-    mock_client.list_activities.return_value = []
+    mock_client.list_activities_in_range.return_value = []
 
     result = get_activities_in_range(date(2026, 5, 1), date(2026, 5, 7))
     assert result == []
-
-
-@patch("strava_mcp.client.StravaClient")
-def test_activities_timestamp_buffer(mock_cls):
-    """Verify after/before params include ±1 day buffer."""
-    mock_client = MagicMock()
-    mock_cls.return_value = mock_client
-    mock_client.list_activities.return_value = []
-
-    from datetime import datetime, timezone
-    start = date(2026, 5, 3)
-    end = date(2026, 5, 5)
-    get_activities_in_range(start, end)
-
-    call_kwargs = mock_client.list_activities.call_args.kwargs
-    expected_after = int(datetime(2026, 5, 3, tzinfo=timezone.utc).timestamp()) - 86400
-    expected_before = int(datetime(2026, 5, 5, 23, 59, 59, tzinfo=timezone.utc).timestamp()) + 86400
-    assert call_kwargs["after"] == expected_after
-    assert call_kwargs["before"] == expected_before
