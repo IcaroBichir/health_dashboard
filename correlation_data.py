@@ -80,6 +80,8 @@ def build_correlation_context(
     period_label: str,
     metrics: dict,
     as_of: date,
+    body_comp: dict | None = None,
+    body_comp_trend: dict | None = None,
 ) -> str:
     if not metrics or not metrics.get("paired_days"):
         return f"## Nutrition × Exercise — {period_label}\n\nNo days with both exercise and nutrition data."
@@ -87,6 +89,36 @@ def build_correlation_context(
     lines = [
         f"## Nutrition × Exercise Correlation — {period_label} (as of {as_of.strftime('%B %d, %Y')})",
         "",
+    ]
+
+    if body_comp:
+        bc_parts = []
+        if "weight_kg" in body_comp:
+            bc_parts.append(f"weight {body_comp['weight_kg']:.1f} kg")
+        if "fat_ratio_pct" in body_comp:
+            bc_parts.append(f"body fat {body_comp['fat_ratio_pct']:.1f}%")
+        if "muscle_mass_kg" in body_comp:
+            bc_parts.append(f"muscle {body_comp['muscle_mass_kg']:.1f} kg")
+        if "fat_free_mass_kg" in body_comp:
+            bc_parts.append(f"fat-free mass {body_comp['fat_free_mass_kg']:.1f} kg")
+        if bc_parts:
+            lines += [
+                f"### Body composition (most recent reading: {body_comp.get('date', 'n/a')})",
+                "- " + " | ".join(bc_parts),
+            ]
+            if body_comp_trend:
+                trend_parts = []
+                if "weight_kg" in body_comp_trend:
+                    trend_parts.append(f"weight {body_comp_trend['weight_kg']:+.1f} kg")
+                if "fat_ratio_pct" in body_comp_trend:
+                    trend_parts.append(f"body fat {body_comp_trend['fat_ratio_pct']:+.1f}%")
+                if "muscle_mass_kg" in body_comp_trend:
+                    trend_parts.append(f"muscle {body_comp_trend['muscle_mass_kg']:+.1f} kg")
+                if trend_parts:
+                    lines.append(f"- Change over period: " + " | ".join(trend_parts))
+            lines.append("")
+
+    lines += [
         "### Overview",
         f"- Workout days: {metrics['total_act_days']}",
         f"- Nutrition-logged days: {metrics['total_nutr_days']}",

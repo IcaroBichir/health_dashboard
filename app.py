@@ -14,6 +14,7 @@ from strava_data import (
     get_activities_in_range,
 )
 from mfp_data import get_nutrition_for_date, get_nutrition_range
+from withings_data import get_withings_measurements, latest_measurement, body_comp_trend
 from running_data import (
     runs_in_window,
     compute_run_metrics,
@@ -194,6 +195,11 @@ def fetch_nutrition_range(start: date, end: date) -> list[dict]:
     return get_nutrition_range(start, end)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_withings(start: date, end: date) -> list[dict]:
+    return get_withings_measurements(start, end)
+
+
 # ── Rendering helpers ─────────────────────────────────────────────────────────
 
 def _activity_stats(a: dict) -> str:
@@ -270,6 +276,54 @@ def render_calorie_balance(calories_consumed: int, calories_burned: int) -> None
         c1.metric("Consumed", f"{calories_consumed} kcal" if calories_consumed else "—")
         c2.metric("Burned", f"{calories_burned} kcal" if calories_burned else "—")
         c3.metric("Net", f"{net:+d} kcal")
+
+
+def render_body_comp(measurement: dict, trend: dict | None = None, compact: bool = False) -> None:
+    """Render a body composition card. compact=True shows fewer fields."""
+    date_str = measurement.get("date", "")
+    weight = measurement.get("weight_kg")
+    fat_pct = measurement.get("fat_ratio_pct")
+    muscle = measurement.get("muscle_mass_kg")
+    fat_free = measurement.get("fat_free_mass_kg")
+    fat_mass = measurement.get("fat_mass_kg")
+
+    with st.container(border=True):
+        if date_str:
+            st.caption(f"Scale reading: {date_str}")
+
+        if compact:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Weight", f"{weight:.1f} kg" if weight else "—",
+                      delta=f"{trend['weight_kg']:+.1f} kg" if trend and "weight_kg" in trend else None,
+                      delta_color="off")
+            c2.metric("Body Fat", f"{fat_pct:.1f}%" if fat_pct else "—",
+                      delta=f"{trend['fat_ratio_pct']:+.1f}%" if trend and "fat_ratio_pct" in trend else None,
+                      delta_color="inverse")
+            c3.metric("Muscle", f"{muscle:.1f} kg" if muscle else "—",
+                      delta=f"{trend['muscle_mass_kg']:+.1f} kg" if trend and "muscle_mass_kg" in trend else None,
+                      delta_color="normal")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Weight", f"{weight:.2f} kg" if weight else "—",
+                      delta=f"{trend['weight_kg']:+.2f} kg" if trend and "weight_kg" in trend else None,
+                      delta_color="off")
+            c2.metric("Body Fat", f"{fat_pct:.1f}%" if fat_pct else "—",
+                      delta=f"{trend['fat_ratio_pct']:+.1f}%" if trend and "fat_ratio_pct" in trend else None,
+                      delta_color="inverse")
+            c3.metric("Muscle Mass", f"{muscle:.2f} kg" if muscle else "—",
+                      delta=f"{trend['muscle_mass_kg']:+.2f} kg" if trend and "muscle_mass_kg" in trend else None,
+                      delta_color="normal")
+            c4.metric("Fat-Free Mass", f"{fat_free:.2f} kg" if fat_free else "—",
+                      delta=f"{trend['fat_free_mass_kg']:+.2f} kg" if trend and "fat_free_mass_kg" in trend else None,
+                      delta_color="normal")
+
+            if fat_mass or measurement.get("bone_mass_kg") or measurement.get("hydration_kg"):
+                c5, c6, c7, _ = st.columns(4)
+                c5.metric("Fat Mass", f"{fat_mass:.2f} kg" if fat_mass else "—")
+                c6.metric("Bone Mass", f"{measurement.get('bone_mass_kg', 0):.2f} kg"
+                          if measurement.get("bone_mass_kg") else "—")
+                c7.metric("Hydration", f"{measurement.get('hydration_kg', 0):.2f} kg"
+                          if measurement.get("hydration_kg") else "—")
 
 
 def _nutrition_avgs(days: list[dict]) -> dict | None:
@@ -349,6 +403,7 @@ with st.spinner("Loading…"):
     nutrition_yesterday = fetch_nutrition(yesterday)
     nutrition_week  = fetch_nutrition_range(week_start, today)
     nutrition_month = fetch_nutrition_range(month_start, today)
+    withings_month  = fetch_withings(month_start, today)
 
 today_acts     = [a for a in all_week if a.get("start_date_local", "")[:10] == str(today)]
 yesterday_acts = [a for a in all_week if a.get("start_date_local", "")[:10] == str(yesterday)]
@@ -374,6 +429,9 @@ today_consumed     = _consumed(nutrition_today)
 yesterday_consumed = _consumed(nutrition_yesterday)
 week_consumed      = round(sum(_consumed(d) for d in nutrition_week))
 month_consumed     = round(sum(_consumed(d) for d in nutrition_month))
+
+latest_body_comp   = latest_measurement(withings_month)
+month_body_trend   = body_comp_trend(withings_month)
 
 # ── Nutrition availability check (determines if correlation tab is shown) ─────
 
@@ -418,6 +476,9 @@ with tab1:
         render_nutrition(nutrition_today)
         st.markdown("**Calorie Balance**")
         render_calorie_balance(today_consumed, today_burned)
+        if latest_body_comp:
+            st.markdown("**Body Composition**")
+            render_body_comp(latest_body_comp, compact=True)
 
     with col_yesterday:
         st.subheader(f"Yesterday · {yesterday.strftime('%b %d')}")
@@ -507,6 +568,16 @@ with tab3:
 
     st.markdown("**Calorie Balance (30-day total)**")
     render_calorie_balance(month_consumed, month_burned)
+
+    if latest_body_comp:
+        st.markdown("**Body Composition**")
+        if len(withings_month) >= 2:
+            oldest = withings_month[-1]
+            st.caption(
+                f"Scale readings: {oldest['date']} → {latest_body_comp['date']} "
+                f"({len(withings_month)} readings). Deltas show change over that span."
+            )
+        render_body_comp(latest_body_comp, trend=month_body_trend)
 
 # ── Tab 4: Running ────────────────────────────────────────────────────────────
 
@@ -788,7 +859,12 @@ def _render_corr_metrics(metrics: dict) -> None:
         ec3.metric("Avg Net", f"{metrics['avg_net']:+d} kcal")
 
 
-def _render_corr_eval_box(period: str, metrics: dict) -> None:
+def _render_corr_eval_box(
+    period: str,
+    metrics: dict,
+    body_comp: dict | None = None,
+    bc_trend: dict | None = None,
+) -> None:
     st.markdown("**🤖 AI Coach Evaluation**")
     with st.container(border=True):
         is_cached = correlation_evaluation_is_cached(period)
@@ -802,6 +878,8 @@ def _render_corr_eval_box(period: str, metrics: dict) -> None:
                 ctx = build_correlation_context(
                     f"Last {period.replace('d', ' Days')}",
                     metrics, today,
+                    body_comp=body_comp,
+                    body_comp_trend=bc_trend,
                 )
                 _CORR_PENDING_DIR.mkdir(parents=True, exist_ok=True)
                 _corr_pending_path(period).write_text(ctx)
@@ -818,6 +896,8 @@ def _render_corr_eval_box(period: str, metrics: dict) -> None:
                     ctx = build_correlation_context(
                         f"Last {period.replace('d', ' Days')}",
                         metrics, today,
+                        body_comp=body_comp,
+                        body_comp_trend=bc_trend,
                     )
                     _CORR_PENDING_DIR.mkdir(parents=True, exist_ok=True)
                     _corr_pending_path(period).write_text(ctx)
@@ -830,17 +910,36 @@ if tab5 is not None:
     with tab5:
         st.subheader("Nutrition × Exercise")
 
+        # ── Body Composition snapshot ─────────────────────────────────────────
+        if latest_body_comp:
+            st.markdown("### ⚖️ Body Composition")
+            if len(withings_month) >= 2:
+                oldest = withings_month[-1]
+                st.caption(
+                    f"Most recent reading: **{latest_body_comp['date']}**. "
+                    f"Trend deltas vs earliest reading in window ({oldest['date']})."
+                )
+            else:
+                st.caption(f"Most recent reading: **{latest_body_comp['date']}**.")
+            render_body_comp(latest_body_comp, trend=month_body_trend)
+            st.divider()
+
         nutr_fifteen = [d for d in _nutrition_month
                         if d["date"] >= fifteen_start.isoformat()]
 
         corr_15d = compute_correlation_metrics(all_month, _nutrition_month, fifteen_start)
         corr_30d = compute_correlation_metrics(all_month, _nutrition_month, month_start)
 
+        # Withings trend for the 15-day window
+        withings_15d = [m for m in withings_month if m["date"] >= fifteen_start.isoformat()]
+        latest_bc_15d = latest_measurement(withings_15d)
+        trend_15d = body_comp_trend(withings_15d)
+
         # ── 15-day section ────────────────────────────────────────────────────
         st.markdown(f"### 📅 Last 15 Days · {fifteen_start.strftime('%b %d')} – {today.strftime('%b %d')}")
         _render_corr_metrics(corr_15d)
         if corr_15d.get("overlap_days"):
-            _render_corr_eval_box("15d", corr_15d)
+            _render_corr_eval_box("15d", corr_15d, latest_bc_15d, trend_15d)
 
         st.divider()
 
@@ -848,7 +947,7 @@ if tab5 is not None:
         st.markdown(f"### 📅 Last 30 Days · {month_start.strftime('%b %d')} – {today.strftime('%b %d')}")
         _render_corr_metrics(corr_30d)
         if corr_30d.get("overlap_days"):
-            _render_corr_eval_box("30d", corr_30d)
+            _render_corr_eval_box("30d", corr_30d, latest_body_comp, month_body_trend)
 
 # ── Chat (optional) ───────────────────────────────────────────────────────────
 
