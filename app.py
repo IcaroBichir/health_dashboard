@@ -506,6 +506,21 @@ with tab2:
     s5.metric("Total Burned", f"{week_burned} kcal")
     s6.metric("Total Consumed", f"{week_consumed} kcal")
 
+    withings_7d = [m for m in withings_month if m["date"] >= week_start.isoformat()]
+    latest_bc_7d = latest_measurement(withings_7d)
+    trend_7d = body_comp_trend(withings_7d)
+    if latest_bc_7d:
+        st.markdown("**Body Composition**")
+        if len(withings_7d) >= 2:
+            oldest_7d = withings_7d[-1]
+            st.caption(
+                f"Most recent reading: **{latest_bc_7d['date']}**. "
+                f"Trend deltas vs {oldest_7d['date']} ({len(withings_7d)} readings this week)."
+            )
+        else:
+            st.caption(f"Most recent reading: **{latest_bc_7d['date']}**. Only 1 reading this week — no trend.")
+        render_body_comp(latest_bc_7d, trend=trend_7d)
+
     st.divider()
 
     # ── Per-day breakdown ────────────────────────────────────────────────────
@@ -805,12 +820,15 @@ with tab4:
 
 _CORR_SYSTEM = """\
 You are an expert sports nutritionist and endurance coach analyzing an athlete's \
-nutrition and exercise data. The athlete runs primarily in the morning (8–10am), \
-so the prior day's nutrition is the primary pre-workout fuel source. \
+nutrition, exercise, and body composition data. The athlete runs primarily in the \
+morning (8–10am), so the prior day's nutrition is the primary pre-workout fuel source. \
 Analyze: (1) how prior-day carbs, calories, and protein correlate with next-day \
 pace, HR, and suffer score; (2) calorie balance sustainability on hard training days; \
 (3) whether protein intake supports recovery between sessions; \
-(4) patterns in nutrition on workout days vs rest days. \
+(4) patterns in nutrition on workout days vs rest days; \
+(5) whether the calorie balance and macros are consistent with the body composition \
+trend shown by the Withings scale (weight, fat%, muscle mass) — call out if the data \
+supports or contradicts the athlete's likely goals. \
 Give 2-3 specific, data-driven recommendations. Reference actual dates and numbers \
 where patterns are clear. Write 4-6 short paragraphs. \
 Tone: direct, analytical — not generic nutrition advice.\
