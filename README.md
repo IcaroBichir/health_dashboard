@@ -1,6 +1,6 @@
 # health-dashboard
 
-Local Streamlit dashboard combining Strava training and MyFitnessPal nutrition data. Five tabs covering daily activity, weekly trends, monthly overview, dedicated running analytics, and a nutrition × exercise correlation view.
+Local Streamlit dashboard combining Strava training, MyFitnessPal nutrition, and Withings body composition data. Five tabs covering daily activity, weekly trends, monthly overview, dedicated running analytics, and a nutrition × exercise correlation view with body composition context.
 
 ---
 
@@ -10,14 +10,16 @@ Local Streamlit dashboard combining Strava training and MyFitnessPal nutrition d
 - **Exercise**: activity cards with distance, time, pace/speed, HR, and calories burned
 - **Nutrition**: calories consumed vs goal, protein / carbs / fat
 - **Calorie Balance**: consumed vs burned (Strava) vs net
+- **Body Composition**: most recent Withings scale reading (weight, fat%, muscle)
 
-**Last 7 Days** — per-day breakdown with aggregate header row:
-- Exercise: total activities, run distance, total time, calories burned
-- Nutrition: avg daily calories, protein, carbs, fat
-- Calorie Balance: 7-day totals
-- Full per-day activity list with nutrition
+**Last 7 Days** — aggregate header row, then per-day breakdown:
+- Exercise: total activities, run distance, total time, calories burned and consumed
+- **Body Composition**: most recent scale reading with trend deltas vs earliest reading in the window
+- Full per-day activity list with nutrition and calorie balance
 
-**Last 30 Days** — same structure over the full month
+**Last 30 Days** — same structure over the full month:
+- Exercise, nutrition averages, calorie balance
+- **Body Composition**: full 7-field card (weight, fat%, muscle, fat-free mass, fat mass, bone, hydration) with trend deltas over the period
 
 **🏃 Running** — dedicated running analytics across three time windows (newest first):
 - **7 Days**: aggregate metrics + expandable per-run cards with full detail
@@ -27,12 +29,13 @@ Local Streamlit dashboard combining Strava training and MyFitnessPal nutrition d
 - 7-day run cards include per-km splits, cadence, perceived effort, and power if recorded
 - AI Coach Evaluation on each time window (see [AI evaluations](#ai-evaluations))
 
-**🔗 Nutrition × Exercise** *(only shown when MFP nutrition data is available)* — correlation between fueling and exercise performance:
-- **15 Days** (top) and **30 Days** (bottom)
-- Overview: paired days, workout vs rest day count, avg net calorie balance
-- Nutrition comparison: avg calories / protein / carbs / fat on workout days vs rest days, with deltas
-- Energy balance: avg consumed / avg burned / avg net on days with both data sources
-- AI Coach Evaluation analyzing pre-workout fueling patterns, calorie balance, and macro-performance correlations (see [AI evaluations](#ai-evaluations))
+**🔗 Nutrition × Exercise** *(only shown when MFP data is available)* — correlation between fueling, exercise performance, and body composition:
+- **Body Composition snapshot** at the top: most recent scale reading with trend deltas, spanning the 30-day window
+- **15 Days** (top) and **30 Days** (bottom):
+  - Overview: paired days, workout vs rest day count, avg net calorie balance
+  - Nutrition comparison: avg calories / protein / carbs / fat on workout days vs rest days, with deltas
+  - Energy balance: avg consumed / avg burned / avg net
+  - AI Coach Evaluation analyzing pre-workout fueling patterns, calorie balance, macro-performance correlations, and whether body composition changes align with nutrition and training load (see [AI evaluations](#ai-evaluations))
 
 ---
 
@@ -56,7 +59,7 @@ Clicking **Apply theme** writes `.streamlit/config.toml` and reloads the app.
 
 **↺ Refresh** — clears Streamlit in-memory cache and reloads.
 
-**⬇ Pull API** — choose a date range (Today / Yesterday / Last 7 Days / Last 30 Days), then confirm. Deletes matching SQLite cache entries for Strava and MFP and triggers a fresh API fetch. An optional **"Regenerate AI coach evaluations"** checkbox also invalidates all cached evaluations so they are regenerated on next view.
+**⬇ Pull API** — choose a date range (Today / Yesterday / Last 7 Days / Last 30 Days), then confirm. Deletes matching SQLite cache entries for Strava and MFP and triggers a fresh API fetch. An optional **"Regenerate AI coach evaluations"** checkbox also invalidates all cached evaluations so they are regenerated on next restart.
 
 ---
 
@@ -66,7 +69,7 @@ The Running and Nutrition × Exercise tabs include AI coaching analysis generate
 
 ### How it works
 
-Evaluations are generated externally (in a Claude Code session) via `claude -p` and written to a local SQLite cache. The dashboard only reads from cache — it never calls an LLM directly.
+Evaluations are generated at dashboard startup via `claude -p` and written to a local SQLite cache. The dashboard only reads from cache — it never calls an LLM directly.
 
 - **Cache location:** `~/.config/health-dashboard/cache.db`
 - **TTL:** 8 hours per evaluation, keyed by period + date (`run_eval:7d:2026-05-26`, `corr_eval:30d:2026-05-26`)
@@ -100,9 +103,15 @@ To force-regenerate all evaluations:
 .venv/bin/python generate_evals.py --force
 ```
 
-### Requesting from the dashboard
+### Requesting a fresh evaluation from the dashboard
 
-If an evaluation is not cached, clicking **Request evaluation** in the dashboard saves the data context to `~/.config/health-dashboard/pending_evals/` and prompts you to ask Claude Code to generate it. In Claude Code: *"Generate my running evaluations"* or *"Generate my correlation evaluations"*.
+Clicking **↺ Request new evaluation** invalidates the cached evaluation for that period. The dashboard shows: **"Evaluation cleared. Restart the dashboard to generate a fresh one."**
+
+Restarting (`./start`) triggers `generate_evals.py`, which produces the new evaluation before the browser opens.
+
+### Correlation evaluation context
+
+The Nutrition × Exercise evaluation includes Withings body composition data (latest reading + trend deltas for the period) alongside the day-by-day nutrition and exercise data. The AI coach is asked to analyze whether calorie balance and macro patterns are consistent with the body composition changes the scale is showing.
 
 ---
 
@@ -110,7 +119,7 @@ If an evaluation is not cached, clicking **Request evaluation** in the dashboard
 
 ```bash
 ./start           # normal launch
-./start --no-eval # skip AI evaluation check (faster, evaluation boxes show Request button)
+./start --no-eval # skip AI evaluation check (faster; evaluation boxes show Request button)
 ```
 
 The `./start` wrapper runs auth checks before launching Streamlit:
@@ -139,6 +148,7 @@ Any flags beyond `--no-eval` are forwarded to Streamlit (e.g. `./start --server.
 - Python 3.11+
 - [strava-mcp](../mcp_strava) authenticated (`strava-mcp auth` already run)
 - [mcp-myfitnesspal](../mcp_myfitnesspal) authenticated (`mfp-mcp auth` already run)
+- [mcp-withings](../mcp_withings) authenticated (`withings-mcp auth` already run)
 - `claude` CLI in `$PATH` (required for AI evaluation generation)
 
 ---
@@ -151,6 +161,7 @@ python3 -m venv .venv
 .venv/bin/pip install streamlit
 .venv/bin/pip install -e ../mcp_strava        # picks up SQLite cache
 .venv/bin/pip install -e ../mcp_myfitnesspal  # picks up SQLite cache
+.venv/bin/pip install -e ../mcp_withings      # picks up SQLite cache
 ```
 
 ---
@@ -164,6 +175,7 @@ python3 -m venv .venv
 | Strava detailed activities | 15 days | `~/.config/strava-mcp/cache.db` |
 | MFP diary (per day) | 15 days (30 min today) | `~/.config/mfp-mcp/cache.db` |
 | MFP cookies | 12 hours | `~/.config/mfp-mcp/cookies.json` |
+| Withings measurements | 24 hours | `~/.config/withings-mcp/cache.db` |
 | AI evaluations | 8 hours (daily key) | `~/.config/health-dashboard/cache.db` |
 
 Strava calories come from the detailed activity endpoint (`/activities/{id}`), fetched once per activity and cached separately from the summary list. The first load after a cache clear will make one additional API call per activity.
