@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from running_data import runs_in_window, compute_run_metrics, build_evaluation_context
 from correlation_data import compute_correlation_metrics, build_correlation_context
+from withings_data import get_withings_measurements, latest_measurement, body_comp_trend
 from claude_eval import (
     write_evaluation_to_cache,
     evaluation_is_cached,
@@ -34,12 +35,15 @@ Tone: direct, coach-like, honest — not generic motivational fluff.\
 
 _CORR_SYSTEM = """\
 You are an expert sports nutritionist and endurance coach analyzing an athlete's \
-nutrition and exercise data. The athlete runs primarily in the morning (8–10am), \
-so the prior day's nutrition is the key pre-workout fuel source. \
+nutrition, exercise, and body composition data. The athlete runs primarily in the \
+morning (8–10am), so the prior day's nutrition is the primary pre-workout fuel source. \
 Analyze: (1) how prior-day carbs, calories, and protein correlate with next-day \
 pace, HR, and suffer score; (2) calorie balance sustainability on hard training days; \
 (3) whether protein intake supports recovery between sessions; \
-(4) patterns in nutrition on workout days vs rest days. \
+(4) patterns in nutrition on workout days vs rest days; \
+(5) whether the calorie balance and macros are consistent with the body composition \
+trend shown by the Withings scale (weight, fat%, muscle mass) — call out if the data \
+supports or contradicts the athlete's likely goals. \
 Give 2-3 specific, data-driven recommendations. Reference actual dates and numbers \
 where patterns are clear. Write 4-6 short paragraphs. \
 Tone: direct, analytical — not generic nutrition advice.\
@@ -107,7 +111,8 @@ def _generate_run(period: str, runs: list[dict], metrics: dict, force: bool) -> 
 
 
 def _generate_corr(period: str, label: str, all_month: list[dict],
-                   nutrition_month: list[dict], start: date, force: bool) -> None:
+                   nutrition_month: list[dict], start: date,
+                   withings_month: list[dict], force: bool) -> None:
     if not force and correlation_evaluation_is_cached(period):
         print(f"  corr/{period:>3}  ✓  cached")
         return
@@ -115,7 +120,10 @@ def _generate_corr(period: str, label: str, all_month: list[dict],
     if not metrics.get("overlap_days"):
         print(f"  corr/{period:>3}  —  no paired days")
         return
-    ctx = build_correlation_context(label, metrics, TODAY)
+    withings_window = [m for m in withings_month if m["date"] >= start.isoformat()]
+    bc = latest_measurement(withings_window)
+    bc_trend = body_comp_trend(withings_window)
+    ctx = build_correlation_context(label, metrics, TODAY, body_comp=bc, body_comp_trend=bc_trend)
     print(f"  corr/{period:>3}  generating…", end="", flush=True)
     try:
         write_correlation_evaluation_to_cache(period, _call_claude(f"{_CORR_SYSTEM}\n\n{ctx}"))
@@ -147,8 +155,10 @@ def main(force: bool = False) -> int:
         print("  —  MFP data unavailable, skipping correlation evals")
         return 0
 
-    _generate_corr("15d", "Last 15 Days", all_month, nutrition_month, FIFTEEN_START, force)
-    _generate_corr("30d", "Last 30 Days", all_month, nutrition_month, MONTH_START,   force)
+    withings_month = get_withings_measurements(MONTH_START, TODAY)
+
+    _generate_corr("15d", "Last 15 Days", all_month, nutrition_month, FIFTEEN_START, withings_month, force)
+    _generate_corr("30d", "Last 30 Days", all_month, nutrition_month, MONTH_START,   withings_month, force)
     return 0
 
 

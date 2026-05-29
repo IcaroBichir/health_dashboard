@@ -672,14 +672,14 @@ def _render_eval_box(period: str, runs: list[dict], metrics: dict) -> None:
                 _pending_path(period).write_text(ctx)
                 invalidate_run_evaluations()
                 st.info(
-                    f"Context saved. Ask Claude Code: **\"Generate my running evaluations\"**, then restart the dashboard to see it.",
+                    "Evaluation cleared. **Restart the dashboard** to generate a fresh one.",
                     icon="💬",
                 )
         else:
             pending = _pending_path(period)
             if pending.exists():
                 st.info(
-                    "Context is ready. Ask Claude Code: **\"Generate my running evaluations\"**, then restart the dashboard to see it.",
+                    "**Restart the dashboard** to generate your evaluation.",
                     icon="💬",
                 )
             else:
@@ -903,11 +903,11 @@ def _render_corr_eval_box(
                 _corr_pending_path(period).write_text(ctx)
                 from claude_eval import invalidate_all_evaluations
                 invalidate_all_evaluations()
-                st.info("Context saved. Ask Claude Code: **\"Generate my correlation evaluations\"**, then restart the dashboard to see it.", icon="💬")
+                st.info("Evaluation cleared. **Restart the dashboard** to generate a fresh one.", icon="💬")
         else:
             pending = _corr_pending_path(period)
             if pending.exists():
-                st.info("Context is ready. Ask Claude Code: **\"Generate my correlation evaluations\"**, then restart the dashboard to see it.", icon="💬")
+                st.info("**Restart the dashboard** to generate your evaluation.", icon="💬")
             else:
                 btn_col, _ = st.columns([1, 3])
                 if btn_col.button("✨ Request evaluation", key=f"corr_btn_{period}", use_container_width=True):
@@ -919,7 +919,7 @@ def _render_corr_eval_box(
                     )
                     _CORR_PENDING_DIR.mkdir(parents=True, exist_ok=True)
                     _corr_pending_path(period).write_text(ctx)
-                    st.info("Context saved. Ask Claude Code: **\"Generate my correlation evaluations\"**, then restart the dashboard to see it.", icon="💬")
+                    st.info("Evaluation cleared. **Restart the dashboard** to generate a fresh one.", icon="💬")
                 else:
                     st.caption("Click **Request evaluation** — Claude Code will generate it from this session.")
 
